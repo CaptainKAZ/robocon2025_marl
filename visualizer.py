@@ -96,7 +96,7 @@ class BatchRobotVisualizer:
                 violations[env_idx],
                 velocities[env_idx] if velocities is not None else None,
                 targets[env_idx] if targets is not None else None,  # 新增targets参数
-                dones[env_idx],
+                dones[env_idx] if dones is not None else None,
                 rewards[env_idx],
                 env_idx,
             )
