@@ -34,6 +34,14 @@ class BatchedMultiAgentEnv(gym.Env):
             low=-Config.MAX_ACCEL, high=Config.MAX_ACCEL, shape=(2,), dtype=np.float32
         )
 
+        self.done_mask = torch.zeros(
+            (num_envs,), dtype=torch.bool, device=self.device
+        )
+
+    def get_done_mask(self):
+        """获取done_mask"""
+        return self.done_mask.cpu().numpy()
+
     def _physics_step(self, accelerations):
         """执行物理模拟步骤"""
         # 限制加速度
@@ -89,7 +97,7 @@ class BatchedMultiAgentEnv(gym.Env):
             actions, device=self.device, dtype=torch.float32
         )
         accelerations = accelerations.reshape(self.num_envs, Config.NUM_AGENTS, -1)
-
+        accelerations[self.done_mask] = 0.0
         # 物理模拟
         self._physics_step(accelerations)
 
@@ -103,6 +111,8 @@ class BatchedMultiAgentEnv(gym.Env):
         rewards = self._handle_boundary_penalties(rewards)
         # 终止条件和奖励计算
         reach_target, rewards = self._compute_terminal_rewards(rewards, collision_dones)
+        # 奖励缩放
+        rewards *= Config.REWARD_SCALE
 
         # terminated 和 truncated 的计算
         collision_any = collision_matrix.any(dim=(1, 2))  # [num_envs]
@@ -120,10 +130,10 @@ class BatchedMultiAgentEnv(gym.Env):
             collision_any.unsqueeze(1) & ~agent_collisions
         ).bool()  # [num_envs, NUM_AGENTS]
 
-        self.velocities[collision_dones | reach_target] = 0.0
+        self.done_mask |= collision_dones | reach_target
+        self.velocities[self.done_mask] = 0.0
+        rewards[self.done_mask] = 0.0
 
-        # 奖励缩放
-        rewards *= Config.REWARD_SCALE
 
         obs = self._get_obs()
 
@@ -132,7 +142,7 @@ class BatchedMultiAgentEnv(gym.Env):
             "collisions": collision_matrix.cpu().numpy(),
         }
 
-        return obs, rewards, terminated, truncated, info
+        return obs, rewards.cpu().numpy(), terminated.cpu().numpy(), truncated.cpu().numpy(), info
 
     def _compute_base_rewards(self):
         """计算基础奖励分量"""
@@ -220,51 +230,37 @@ class BatchedMultiAgentEnv(gym.Env):
     def _get_obs(self):
         """构建观测张量"""
         obs = torch.zeros(
-            (self.num_envs, Config.NUM_AGENTS, Config.OBS_DIM),
+            (self.num_envs, Config.NUM_AGENTS, Config.OBS_DIM), 
             device=self.device,
-            dtype=torch.float32,
+            dtype=torch.float32
         )
-
-        # 自身状态
-        self_pos = self.positions  # [num_envs, NUM_AGENTS, 2]
-        self_vel = self.velocities  # [num_envs, NUM_AGENTS, 2]
-
-        # 队友信息
-        teammate_ids = torch.tensor([[1, 0, 3, 2]], device=self.device).repeat(
-            self.num_envs, 1
-        )
-        team_pos = torch.gather(
-            self.positions, 1, teammate_ids.unsqueeze(-1).expand(-1, -1, 2)
-        )
-        team_vel = torch.gather(
-            self.velocities, 1, teammate_ids.unsqueeze(-1).expand(-1, -1, 2)
-        )
-
-        # 对手信息
-        opp_ids = torch.tensor([[2, 3, 0, 1]], device=self.device).repeat(
-            self.num_envs, 1
-        )
-        opp_pos = torch.gather(
-            self.positions, 1, opp_ids.unsqueeze(-1).expand(-1, -1, 2)
-        ).flatten(start_dim=2)
-        opp_vel = torch.gather(
-            self.velocities, 1, opp_ids.unsqueeze(-1).expand(-1, -1, 2)
-        ).flatten(start_dim=2)
-
-        # 拼接观测
-        obs = torch.cat(
-            [
+        
+        for agent_id in range(Config.NUM_AGENTS):
+            # 自身状态
+            self_pos = self.positions[:, agent_id]
+            self_vel = self.velocities[:, agent_id]
+            
+            # 队友信息
+            teammate_id = 1 if agent_id == 0 else 0 if agent_id == 1 else 3 if agent_id == 2 else 2
+            team_pos = self.positions[:, teammate_id]
+            team_vel = self.velocities[:, teammate_id]
+            
+            # 对手信息
+            opp_ids = [2, 3] if agent_id < 2 else [0, 1]
+            opp_pos = self.positions[:, opp_ids].flatten(start_dim=1)
+            opp_vel = self.velocities[:, opp_ids].flatten(start_dim=1)
+            
+            # 拼接观测
+            obs[:, agent_id] = torch.cat([
                 self_pos,
                 self_vel,
                 team_pos,
                 team_vel,
                 opp_pos,
                 opp_vel,
-                self.targets.unsqueeze(1).expand(-1, Config.NUM_AGENTS, -1),
-            ],
-            dim=2,
-        )
-
+                self.targets
+            ], dim=1)
+        
         return obs.cpu().numpy()
 
     def reset(self):
@@ -291,6 +287,7 @@ class BatchedMultiAgentEnv(gym.Env):
         self.velocities.zero_()
         self.collision_speeds.zero_()
         self.boundary_collision_flags.zero_()
+        self.done_mask.zero_()
 
         return self._get_obs(), {}
 

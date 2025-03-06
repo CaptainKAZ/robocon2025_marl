@@ -143,7 +143,7 @@ class BatchRobotVisualizer:
                         )
                 # reward 显示
                 if rewards is not None:
-                    text = self.env_font.render(f"{rewards[robot_idx]}", True, (100, 100, 100))
+                    text = self.env_font.render(f"{rewards[robot_idx]:.3g}", True, (100, 100, 100))
                     self.screen.blit(text, (screen_pos[0], screen_pos[1]))
 
             if target is not None:

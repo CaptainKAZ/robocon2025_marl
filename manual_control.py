@@ -88,7 +88,7 @@ class ManualController:
 
             # 环境步进
             with torch.no_grad():
-                obs, rewards, dones, info = self.env.step(actions.numpy())
+                obs, rewards, terminated, truncated, info = self.env.step(actions.numpy())
 
             # 提取所有智能体的位置 (前2维)
             positions = obs[:, :, :2]  # [num_envs, num_agents, 2]
@@ -105,7 +105,7 @@ class ManualController:
                 "velocities": velocities,  # 形状 [num_envs, 4, 2]
                 "targets": targets,  # 形状 [num_envs, 2]
                 "violations": info["violations"],  # 形状 [num_envs, 4]
-                "dones": dones,  # 形状 [num_envs]
+                "dones": None,  # 形状 [num_envs]
                 "rewards": rewards,
             }
             env_indices = list(range(self.env.num_envs))

@@ -5,7 +5,10 @@ class Config:
     MAX_SPEED = 5.0  # 新增速度限制
     ROBOT_RADIUS = 0.3
     DT = 0.1
-    FRICTION = 0.1
+    FRICTION = 0.0
+
+    # 游戏设置
+    MAX_TIME = 60
 
     # 场地参数
     WIDTH = 15

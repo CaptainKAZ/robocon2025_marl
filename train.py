@@ -35,6 +35,7 @@ class RLlibWrapper(MultiAgentEnv):
         self.observation_space = gym.spaces.Dict(self.observation_spaces)
         self.action_space = gym.spaces.Dict(self.action_spaces)
         self.visual_env_idx = None
+        self.steps = 0
 
     def reset(self, seed=None, options=None):
         print("Calling Reset!!!!")
@@ -47,34 +48,38 @@ class RLlibWrapper(MultiAgentEnv):
                 observations[agent_id] = obs[env_index][agent_index]
         pygame.quit()
         self.visualizer=None
+        self.steps = 0
         return observations, info
 
     def step(self, action_dict):
+        if not all(isinstance(agent_id, tuple) and len(agent_id) == 2 for agent_id in action_dict.keys()):
+            raise ValueError("action_dict 的键必须是 (env_index, agent_index) 形式的元组")
+
         actions = np.zeros(
             (self.pnum_envs, self.pnum_agents, self.env.action_space.shape[0])
         )
         for agent_id, action in action_dict.items():
             env_index, agent_index = agent_id
             actions[env_index][agent_index] = action
-        obs, rewards, done, info = self.env.step(actions)
-        observations = {}
-        reward_dict = {}
-        done_dict = {}
-        truncated_d = {}
-        for env_index in range(self.pnum_envs):
-            for agent_index in range(self.pnum_agents):
-                agent_id = (env_index, agent_index)
-                if not done[env_index]:
-                    observations[agent_id] = obs[env_index][agent_index]
-                    reward_dict[agent_id] = rewards[env_index][agent_index]
-                done_dict[agent_id] = done[env_index]
-                truncated_d[agent_id] = False
-        print(f"本轮迭代：{sum(done_dict.values())}/{len(done_dict)}，{sum(done_dict.values())/len(done_dict)*100}%")
+
+        already_done = self.env.get_done_mask()
+        obs, rewards, terminated, truncated, _ = self.env.step(actions)
+
+        # 使用 NumPy 向量化操作
+        valid_envs = ~already_done
+        valid_indices = np.where(valid_envs)[0]
+        obs_dict = {(i, j): obs[i, j] for i in valid_indices for j in range(self.pnum_agents)}
+        reward_dict = {(i, j): rewards[i, j] for i in valid_indices for j in range(self.pnum_agents)}
+        truncated_dict = {(i, j): truncated[i, j] for i in valid_indices for j in range(self.pnum_agents)}
+        terminated_dict = {(i, j): terminated[i, j] for i in valid_indices for j in range(self.pnum_agents)}
+
+        now_done = self.env.get_done_mask()
+
         try:
             if self.visualizer is None:
                 self.visualizer = BatchRobotVisualizer()
-            if self.visual_env_idx is None or done[self.visual_env_idx].all():
-                false_indices = np.where(done == False)[0]
+            if self.visual_env_idx is None or now_done[self.visual_env_idx].all():
+                false_indices = np.where(now_done == False)[0]
                 if len(false_indices) >= 4:
                     self.visual_env_idx = np.random.choice(false_indices, size=4, replace=False)
             obs_vis = obs[self.visual_env_idx,:,:]
@@ -93,9 +98,14 @@ class RLlibWrapper(MultiAgentEnv):
             print(f"{e}")
             traceback.print_exc()
 
-        done_dict["__all__"] = all(done_dict.values())
-        truncated_d["__all__"] = all(truncated_d.values())
-        return observations, reward_dict, done_dict, truncated_d, {}
+        terminated_dict["__all__"] = all(terminated_dict.values())
+        truncated_dict["__all__"] = all(truncated_dict.values())
+        print(f"[{self.steps}]本轮迭代: {np.sum(now_done)}/{len(now_done)}，{np.sum(now_done)/len(now_done)*100}%")
+        if self.steps > Config.MAX_TIME / Config.DT:
+            truncated_dict["__all__"] = True
+        self.steps += 1
+
+        return obs_dict, reward_dict, terminated_dict, truncated_dict, {}
 
 
 from ray import tune
@@ -137,9 +147,9 @@ args = parser.parse_args(
         "--num-env-runners",
         "1",
         "--num-gpus-per-learner",
-        "1",
+        "0.25",
         "--num-learners",
-        "1",
+        "4",
         "--evaluation-num-env-runners",
         "1"
     ]
