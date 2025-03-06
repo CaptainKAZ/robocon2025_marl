@@ -145,13 +145,13 @@ args = parser.parse_args(
     args=[
         "--enable-new-api-stack",
         "--num-env-runners",
-        "1",
-        "--num-gpus-per-learner",
-        "0.25",
-        "--num-learners",
-        "4",
-        "--evaluation-num-env-runners",
-        "1"
+        "0",
+        # "--num-gpus-per-learner",
+        # "0.25",
+        # "--num-learners",
+        # "4",
+        # "--evaluation-num-env-runners",
+        # "1"
     ]
 )
 base_config = (

@@ -93,11 +93,12 @@ class BatchedMultiAgentEnv(gym.Env):
     def step(self, actions):
         """环境步进"""
         # 转换动作到tensor [num_envs, agents, action_dim]
+        already_done = self.done_mask.clone()
         accelerations = torch.as_tensor(
             actions, device=self.device, dtype=torch.float32
         )
         accelerations = accelerations.reshape(self.num_envs, Config.NUM_AGENTS, -1)
-        accelerations[self.done_mask] = 0.0
+        accelerations[already_done] = 0.0
         # 物理模拟
         self._physics_step(accelerations)
 
@@ -131,8 +132,8 @@ class BatchedMultiAgentEnv(gym.Env):
         ).bool()  # [num_envs, NUM_AGENTS]
 
         self.done_mask |= collision_dones | reach_target
-        self.velocities[self.done_mask] = 0.0
-        rewards[self.done_mask] = 0.0
+        self.velocities[already_done] = 0.0
+        rewards[already_done] = 0.0
 
 
         obs = self._get_obs()
