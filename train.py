@@ -209,7 +209,7 @@ args = parser.parse_args(
         "PPO",
         "--enable-new-api-stack",
         "--num-env-runners",
-        "3",
+        "2",
         # "--no-tune"
         "--num-gpus-per-learner",
         "1",
@@ -268,7 +268,7 @@ base_config = (
         # },
         # vf_loss_coeff=0.005,
         num_epochs=5,
-        train_batch_size=600,
+        train_batch_size=1000,
     )
     .rl_module(
         rl_module_spec=MultiRLModuleSpec(
