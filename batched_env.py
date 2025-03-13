@@ -294,7 +294,7 @@ class BatchedMultiAgentEnv(gym.Env):
         )
 
         # 队伍奖励/惩罚
-        rewards[:, [0, 1]] += reach_target.unsqueeze(1) * (Config.TEAM_SUCCESS_REWARD*(150-self.steps))
+        rewards[:, [0, 1]] += reach_target.unsqueeze(1) * (Config.TEAM_SUCCESS_REWARD)
         rewards[:, [2, 3]] -= reach_target.unsqueeze(1) * Config.OPPONENT_FAIL_PENALTY
 
         return reach_target, rewards
