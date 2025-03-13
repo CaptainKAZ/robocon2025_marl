@@ -24,17 +24,20 @@ class Config:
     SCALE = 100
     
     # 奖励参数
-    R0_DIST_SCALE = 0.1
+    R0_DIST_SCALE = 0.5
     R0_DIST_VEC_SCALE = 1.0
     R0_SPEED_PENALTY = 0.01
     TARGET_THRESHOLD = 2.0
     R1_R0_SCALE = 0.6
-    R1_OPPONENT_SCALE = 0.4
-    R2_R0_SCALE = 0.6
+    R1_OPPONENT_TARGET_SCALE = 0.4
+    R1_OPPONENT_R0_SCALE = 0.6
+    R2_R0_SCALE = 0.4
     R2_PROXIMITY_SCALE = 0.2
-    R3_R0_SCALE = 0.6
+    R2_R1_SPEED_SCALE = 0.1
+    R3_R0_SCALE = 0.4
     R3_PROXIMITY_SCALE = 0.2
-    TIME_REWARD = 0.02
+    R2_R1_SPEED_SCALE = 0.1
+    TIME_REWARD = 0.002
     VIOLATION_PENALTY = 1.5
     WALL_PENALTY = 1.0
     TEAM_SUCCESS_REWARD = 8.0
@@ -42,9 +45,9 @@ class Config:
     COLLISION_DECAY = 0.95
     REWARD_SCALE = 10
     INTER_AGENT_SAFE = 2.0      # 触发机器人间距惩罚的阈值
-    INTER_AGENT_SCALE = 1.0     # 基础惩罚系数（最大惩罚值为该系数）
+    INTER_AGENT_SCALE = 0.5     # 基础惩罚系数（最大惩罚值为该系数）
     WALL_SAFE_DISTANCE = 0.5    # 触发离墙惩罚的阈值
-    WALL_PROXIMITY_SCALE = 1.0  # 离墙最大惩罚值
+    WALL_PROXIMITY_SCALE = 0.3  # 离墙最大惩罚值
 
     # 系统参数
     NUM_AGENTS = 4

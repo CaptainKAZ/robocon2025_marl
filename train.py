@@ -185,7 +185,7 @@ from ray.rllib.utils.test_utils import (
 )
 from ray.tune.registry import get_trainable_cls
 
-policies = {"attacker1", "attacker2", "defenders", "fixed_policy"}
+policies = {"attacker1", "attacker2", "defenders"}
 
 
 def policy_mapping_fn(agent_id, episode, **kwargs):
@@ -193,9 +193,9 @@ def policy_mapping_fn(agent_id, episode, **kwargs):
     if agent_index == 0:
         return "attacker1"
     elif agent_index == 1:
-        return "fixed_policy"
+        return "attacker2"
     else:
-        return "fixed_policy"
+        return "defenders"
 
 
 parser = add_rllib_example_script_args(
@@ -256,20 +256,19 @@ base_config = (
     get_trainable_cls(args.algo)
     .get_default_config()
     .callbacks(on_algorithm_init=on_algorithm_init)
-    .environment("custom_env", env_config={"num_envs": 256})
+    .environment("custom_env", env_config={"num_envs": 128})
     .multi_agent(
         policies=policies,
         # All agents map to the exact same policy.
         policy_mapping_fn=policy_mapping_fn,
-        policies_to_train=["attacker1"],
     )
     .training(
         # model={
         #     "vf_share_layers": True,
         # },
-        vf_loss_coeff=0.005,
+        # vf_loss_coeff=0.005,
         num_epochs=5,
-        train_batch_size=300,
+        train_batch_size=600,
     )
     .rl_module(
         rl_module_spec=MultiRLModuleSpec(
@@ -288,9 +287,9 @@ base_config = (
                 ),
                 "attacker2": RLModuleSpec(),
                 "defenders": RLModuleSpec(),
-                "fixed_policy": RLModuleSpec(
-                    module_class=RandomRLModule,
-                ),
+                # "fixed_policy": RLModuleSpec(
+                #     module_class=RandomRLModule,
+                # ),
             },
         ),
     )

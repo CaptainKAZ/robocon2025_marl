@@ -159,6 +159,8 @@ class BatchedMultiAgentEnv(gym.Env):
         # 公共计算
         r0_pos = self.positions[:, 0]
         r0_dist = torch.norm(r0_pos - self.targets, dim=1)
+        r0_speed = torch.norm(self.velocities[:, 0], dim=1)
+        opp_positions = self.positions[:, 2:]  # 所有对手的位置（R2和R3）
 
         if self.r0_last_dist is None:
             self.r0_last_dist = r0_dist
@@ -173,25 +175,35 @@ class BatchedMultiAgentEnv(gym.Env):
             0.0,
         )
 
-        rewards[:, 0] = (-r0_dist * Config.R0_DIST_SCALE) + ((self.r0_last_dist - r0_dist) * Config.R0_DIST_VEC_SCALE) - speed_penalty
+        rewards[:, 0] = (-r0_dist * Config.R0_DIST_SCALE) + ((self.r0_last_dist - r0_dist) * Config.R0_DIST_VEC_SCALE) - speed_penalty - Config.TIME_REWARD * self.steps
 
         self.r0_last_dist = r0_dist
 
         # R1奖励：支持R0 + 保持距离
-        rewards[:, 1] = (-r0_dist * Config.R1_R0_SCALE) + torch.norm(
-            opp_positions - self.positions[:, 1].unsqueeze(1), dim=2
-        ).mean(dim=1) * Config.R1_OPPONENT_SCALE
+        opp_to_target_dist = torch.norm(opp_positions - self.targets.unsqueeze(1), dim=2)  # [num_envs, 2]
+        reward_opp_away_from_target = opp_to_target_dist.mean(dim=1) * Config.R1_OPPONENT_TARGET_SCALE  # 对手离目标越远奖励越高
+
+        # 2. 驱赶对手远离R0
+        opp_to_r0_dist = torch.norm(opp_positions - r0_pos.unsqueeze(1), dim=2)  # [num_envs, 2]
+        reward_opp_away_from_r0 = opp_to_r0_dist.mean(dim=1) * Config.R1_OPPONENT_R0_SCALE  # 对手离R0越远奖励越高
+
+        # 合并奖励项
+        rewards[:, 1] = (
+            (-r0_dist * Config.R1_R0_SCALE)  # 原有：鼓励R0接近目标
+            + reward_opp_away_from_target    # 新增：对手远离目标
+            + reward_opp_away_from_r0         # 新增：对手远离R0
+        )
 
         # R2/R3奖励：阻止R0 + 靠近R0
         rewards[:, 2] = (
             (r0_dist * Config.R2_R0_SCALE)
             + (1 / (opp_dist[:, 0] + 1e-6)) * Config.R2_PROXIMITY_SCALE
-            + Config.TIME_REWARD
+            + Config.TIME_REWARD*self.steps + r0_speed * Config.R2_R1_SPEED_SCALE
         )
         rewards[:, 3] = (
             (r0_dist * Config.R3_R0_SCALE)
             + (1 / (opp_dist[:, 1] + 1e-6)) * Config.R3_PROXIMITY_SCALE
-            + Config.TIME_REWARD
+            + Config.TIME_REWARD*self.steps + r0_speed * Config.R2_R1_SPEED_SCALE
         )
 
         return rewards
@@ -309,17 +321,21 @@ class BatchedMultiAgentEnv(gym.Env):
             opp_ids = [2, 3] if agent_id < 2 else [0, 1]
             opp_pos = self.positions[:, opp_ids].flatten(start_dim=1)
             opp_vel = self.velocities[:, opp_ids].flatten(start_dim=1)
+            unknown_target = torch.zeros_like(self.targets)
 
             # 拼接观测
-            obs[:, agent_id] = torch.cat([
-                self_pos,
-                self_vel,
-                team_pos,
-                team_vel,
-                opp_pos,
-                opp_vel,
-                self.targets
-            ], dim=1)
+            obs[:, agent_id] = torch.cat(
+                [
+                    self_pos,
+                    self_vel,
+                    team_pos,
+                    team_vel,
+                    opp_pos,
+                    opp_vel,
+                    self.targets if agent_id < 2 else unknown_target,  # R2 R3不知道R1去哪里投篮
+                ],
+                dim=1,
+            )
 
         return obs.cpu().numpy()
 
