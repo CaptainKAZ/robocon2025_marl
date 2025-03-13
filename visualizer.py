@@ -99,13 +99,14 @@ class BatchRobotVisualizer:
                 dones[env_idx] if dones is not None else None,
                 rewards[env_idx],
                 env_idx,
+                print_info=False if i == 0 else False,
             )
 
         # 绘制全局信息
         self._draw_global_info(batch_data)
         pygame.display.flip()
 
-    def _draw_single_env(self, positions, violations, velocities, target, done, rewards, env_idx):
+    def _draw_single_env(self, positions, violations, velocities, target, done, rewards, env_idx, print_info=False):
         """绘制单个环境实例"""
         # 绘制边界框
         col = env_idx % self.grid_size
@@ -145,6 +146,8 @@ class BatchRobotVisualizer:
                 if rewards is not None:
                     text = self.env_font.render(f"{rewards[robot_idx]:.3g}", True, (100, 100, 100))
                     self.screen.blit(text, (screen_pos[0], screen_pos[1]))
+                    if print_info and robot_idx == 0 and rewards[robot_idx] != 0:
+                        print(f"Env {env_idx} Robot {robot_idx} Reward: {rewards[robot_idx]:.3g}")
 
             if target is not None:
                 screen_target = self._world_to_screen(target, env_idx)
