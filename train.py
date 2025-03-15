@@ -206,7 +206,7 @@ def policy_mapping_fn(agent_id, episode, **kwargs):
     if agent_index == 0:
         return "attackers"
     elif agent_index == 1:
-        return "fixed_policy" 
+        return "defenders" 
 
 
 parser = add_rllib_example_script_args(
@@ -253,7 +253,7 @@ args = parser.parse_args(
 # /home/neo/ray_results/PPO_2025-03-13_13-10-02/PPO_custom_env_6b416_00000_0_2025-03-13_13-10-02/checkpoint_000009
 # best_checkpoint_path = "/home/neo/ray_results/PPO_2025-03-13_03-44-31/PPO_custom_env_6aa0e_00000_0_2025-03-13_03-44-31/checkpoint_000031"
 # best_checkpoint_path = "/home/neo/ray_results/PPO_2025-03-15_11-45-24/PPO_custom_env_ed751_00000_0_2025-03-15_11-45-24/checkpoint_000045"
-best_checkpoint_path = "/home/neo/ray_results/PPO_2025-03-15_15-40-44/PPO_custom_env_cd5b1_00000_0_2025-03-15_15-40-44/checkpoint_000008"
+best_checkpoint_path = "/home/neo/ray_results/PPO_2025-03-15_16-06-19/PPO_custom_env_6096f_00000_0_2025-03-15_16-06-19/checkpoint_000005"
 def on_algorithm_init(algorithm, **kwargs):
 
         # algorithm.restore_from_path(best_checkpoint_path,component=(
@@ -283,7 +283,7 @@ base_config = (
         # },
         # vf_loss_coeff=0.005,
         num_epochs=6,
-        train_batch_size=(Config.MAX_TIME/Config.DT),
+        train_batch_size_per_learner=(Config.MAX_TIME/Config.DT),
         model={
             "fcnet_hiddens": [256, 256, 64],
             "use_lstm": True,
