@@ -17,6 +17,7 @@ import tree
 from pathlib import Path
 from ray.rllib.examples.rl_modules.classes.random_rlm import RandomRLModule
 import os
+from ray.tune import CLIReporter
 
 class FixedRLModule(RLModule):
     @override(RLModule)
@@ -55,15 +56,19 @@ class RLlibWrapperMulti(MultiAgentEnv):
         self.pnum_envs = config.get("num_envs", 1)
         self.visualizer = None
         self.pnum_agents = Config.NUM_AGENTS
+        self.pteams = 2
         self.env = BatchedMultiAgentEnv(num_envs=self.pnum_envs)
         self._agent_ids = set()
         self.observation_spaces = {}
         self.action_spaces = {}
+        merged_action_space = spaces.Box(
+            low=-Config.MAX_ACCEL, high=Config.MAX_ACCEL, shape=(4,), dtype=np.float32
+        )
         for env_index in range(self.pnum_envs):
-            for agent_index in range(self.pnum_agents):
-                agent_id = (env_index, agent_index)
+            for team in range(self.pteams):
+                agent_id = (env_index, team)
                 self.observation_spaces[agent_id] = self.env.observation_space
-                self.action_spaces[agent_id] = self.env.action_space
+                self.action_spaces[agent_id] = merged_action_space
                 self._agent_ids.add(agent_id)
 
         if not self.agents:
@@ -78,14 +83,14 @@ class RLlibWrapperMulti(MultiAgentEnv):
         print("Calling Reset!!!!")
         obs, info = self.env.reset()
         self.visual_env_idx = None
-        observations = {
-            (i, j): obs[i, j]
+        obs_dict = {
+            (i, j): obs[i, j*2]
             for i in range(self.pnum_envs)
-            for j in range(self.pnum_agents)
+            for j in range(self.pteams)
         }
         pygame.quit()
         self.visualizer = None
-        return observations, info
+        return obs_dict, info
     
     def close(self):
         pygame.quit()
@@ -93,47 +98,53 @@ class RLlibWrapperMulti(MultiAgentEnv):
         return super().close()
 
     def step(self, action_dict):
-        if not all(
-            isinstance(agent_id, tuple) and len(agent_id) == 2
-            for agent_id in action_dict.keys()
-        ):
-            raise ValueError(
-                "action_dict 的键必须是 (env_index, agent_index) 形式的元组"
-            )
 
         actions = np.zeros(
             (self.pnum_envs, self.pnum_agents, self.env.action_space.shape[0])
         )
         for agent_id, action in action_dict.items():
-            env_index, agent_index = agent_id
-            actions[env_index][agent_index] = action
+            env_index, team = agent_id
+            actions[env_index][team*2] = action[:2]    # 第一个agent的动作
+            actions[env_index][team*2+1] = action[2:]  # 第二个agent的动作
 
         already_done = self.env.get_done_mask()
-        obs, rewards, terminated, truncated, _ = self.env.step(actions)
+        obs, rewards, terminated, truncated, info = self.env.step(actions)
+        now_done = self.env.get_done_mask()
 
         # 使用 NumPy 向量化操作
         valid_envs = ~already_done
         valid_indices = np.where(valid_envs)[0]
+        
+
         obs_dict = {
-            (i, j): obs[i, j] for i in valid_indices for j in range(self.pnum_agents)
+            (i, j): obs[i, j*2]
+            for i in valid_indices
+            for j in range(self.pteams)
         }
         reward_dict = {
-            (i, j): rewards[i, j]
+            (i, t): rewards[i, t*2] + rewards[i, t*2+1]
             for i in valid_indices
-            for j in range(self.pnum_agents)
+            for t in range(self.pteams)  # 遍历2个团队
         }
         truncated_dict = {
-            (i, j): truncated[i, j]
+            (i, t): truncated[i, t*2] and truncated[i, t*2+1]
             for i in valid_indices
-            for j in range(self.pnum_agents)
-        }
-        terminated_dict = {
-            (i, j): terminated[i, j]
-            for i in valid_indices
-            for j in range(self.pnum_agents)
+            for t in range(self.pteams)
         }
 
-        now_done = self.env.get_done_mask()
+        # 补充缺失的观测到obs_dict
+        for agent_id in truncated_dict:
+            if agent_id not in obs_dict and agent_id != "__all__":
+                env_idx, team = agent_id
+                obs_dict[agent_id] = obs[env_idx, team*2]
+
+        terminated_dict = {
+            (i, t): terminated[i, t*2] or terminated[i, t*2+1]
+            for i in valid_indices
+            for t in range(self.pteams)
+        }
+
+        
 
         try:
             if self.visualizer is None and not pygame.get_init():
@@ -148,12 +159,14 @@ class RLlibWrapperMulti(MultiAgentEnv):
                 obs_vis = obs[self.visual_env_idx, :, :]
                 positions = obs_vis[:, :, :2]
                 velocities = obs_vis[:, :, 2:4]
-                targets = obs_vis[:, 0, -2:]
+                targets = obs_vis[:, 0, -3:-1]
+                violations = info["violations"][self.visual_env_idx, :]
                 viz_data = {
                     "positions": positions,  # 形状 [num_envs, 4, 2]
                     "velocities": velocities,  # 形状 [num_envs, 4, 2]
                     "targets": targets,  # 形状 [num_envs, 2]
                     "rewards": rewards[self.visual_env_idx, :],
+                    "violations": violations,
                 }
                 # print("calling update")
                 self.visualizer.update(viz_data, env_indices=[0, 1, 2, 3])
@@ -161,12 +174,12 @@ class RLlibWrapperMulti(MultiAgentEnv):
             print(f"{e}")
             traceback.print_exc()
 
-        terminated_dict["__all__"] = all(terminated_dict.values())
-        truncated_dict["__all__"] = all(truncated_dict.values())
+        terminated_dict["__all__"] = False
+        truncated_dict["__all__"] = False
         # print(
         #     f"[{self.env.steps}]本轮迭代: {np.sum(now_done)}/{len(now_done)}，{np.sum(now_done)/len(now_done)*100}%"
         # )
-        if self.env.steps >= 500:
+        if self.env.steps >= Config.MAX_TIME/Config.DT:
             terminated_dict["__all__"] = True
 
         return obs_dict, reward_dict, terminated_dict, truncated_dict, {}
@@ -181,21 +194,19 @@ from ray.rllib.core.rl_module.multi_rl_module import MultiRLModuleSpec
 from ray.rllib.core.rl_module.rl_module import RLModuleSpec
 from ray.rllib.utils.test_utils import (
     add_rllib_example_script_args,
-    run_rllib_example_script_experiment,
+    run_rllib_example_script_experiment
 )
 from ray.tune.registry import get_trainable_cls
 
-policies = {"attacker1", "attacker2", "defenders"}
+policies = {"attackers", "defenders", "fixed_policy"}
 
 
 def policy_mapping_fn(agent_id, episode, **kwargs):
     (env_index, agent_index) = agent_id
     if agent_index == 0:
-        return "attacker1"
+        return "attackers"
     elif agent_index == 1:
-        return "attacker2"
-    else:
-        return "defenders"
+        return "fixed_policy" 
 
 
 parser = add_rllib_example_script_args(
@@ -209,7 +220,7 @@ args = parser.parse_args(
         "PPO",
         "--enable-new-api-stack",
         "--num-env-runners",
-        "2",
+        "0",
         # "--no-tune"
         "--num-gpus-per-learner",
         "1",
@@ -217,7 +228,7 @@ args = parser.parse_args(
         "1",
         "--evaluation-num-env-runners",
         "1",
-        # "--evaluation-parallel-to-training",
+        # # "--evaluation-parallel-to-training",
         "--evaluation-interval",
         "5",
         "--evaluation-duration",
@@ -225,21 +236,24 @@ args = parser.parse_args(
         "--evaluation-duration-unit",
         "episodes",
         "--num-cpus-per-learner",
-        "0",
-        # "--local-mode",
-        # "--num-gpus",
-        # "1",
+        "4",
+        # # "--local-mode",
+        # # "--num-gpus",
+        # # "1",
         "--checkpoint-at-end",
         "--checkpoint-freq",
-        "10",
-        "--num-cpus",
-        "16",
+        "5",
+        # "--num-cpus",
+        # "16",
     ]
 )
 # Tuner.restore(path="/home/neo/ray_results/PPO_2025-03-13_03-44-31", trainable=...)
 # /home/neo/ray_results/PPO_2025-03-13_03-44-31/PPO_custom_env_6aa0e_00000_0_2025-03-13_03-44-31/checkpoint_000031
 # best_checkpoint_path = "/home/neo/ray_results/APPO_2025-03-12_03-03-21/APPO_custom_env_800ef_00000_0_2025-03-12_03-03-21/checkpoint_000000/"
-best_checkpoint_path = "/home/neo/ray_results/PPO_2025-03-13_03-44-31/PPO_custom_env_6aa0e_00000_0_2025-03-13_03-44-31/checkpoint_000031"
+# /home/neo/ray_results/PPO_2025-03-13_13-10-02/PPO_custom_env_6b416_00000_0_2025-03-13_13-10-02/checkpoint_000009
+# best_checkpoint_path = "/home/neo/ray_results/PPO_2025-03-13_03-44-31/PPO_custom_env_6aa0e_00000_0_2025-03-13_03-44-31/checkpoint_000031"
+# best_checkpoint_path = "/home/neo/ray_results/PPO_2025-03-15_11-45-24/PPO_custom_env_ed751_00000_0_2025-03-15_11-45-24/checkpoint_000045"
+best_checkpoint_path = "/home/neo/ray_results/PPO_2025-03-15_15-40-44/PPO_custom_env_cd5b1_00000_0_2025-03-15_15-40-44/checkpoint_000008"
 def on_algorithm_init(algorithm, **kwargs):
 
         # algorithm.restore_from_path(best_checkpoint_path,component=(
@@ -256,40 +270,56 @@ base_config = (
     get_trainable_cls(args.algo)
     .get_default_config()
     .callbacks(on_algorithm_init=on_algorithm_init)
-    .environment("custom_env", env_config={"num_envs": 128})
+    .environment("custom_env", env_config={"num_envs": 256})
     .multi_agent(
         policies=policies,
         # All agents map to the exact same policy.
         policy_mapping_fn=policy_mapping_fn,
+        policies_to_train=["attackers", "defenders"],
     )
     .training(
         # model={
         #     "vf_share_layers": True,
         # },
         # vf_loss_coeff=0.005,
-        num_epochs=5,
-        train_batch_size=1000,
+        num_epochs=6,
+        train_batch_size=(Config.MAX_TIME/Config.DT),
+        model={
+            "fcnet_hiddens": [256, 256, 64],
+            "use_lstm": True,
+            "lstm_use_prev_reward": True,
+        },
     )
     .rl_module(
         rl_module_spec=MultiRLModuleSpec(
             rl_module_specs={
-                "attacker1": RLModuleSpec(
-                # .from_module(
-                #     RLModule.from_checkpoint(
-                #         os.path.join(
-                #             "/home/neo/ray_results/PPO_2025-03-13_03-44-31/PPO_custom_env_6aa0e_00000_0_2025-03-13_03-44-31/checkpoint_000031",
-                #             "learner_group",
-                #             "learner",
-                #             "rl_module",
-                #             "attacker1",
-                #         )
-                #     )
+                "attackers": RLModuleSpec
+                .from_module(
+                    RLModule.from_checkpoint(
+                        os.path.join(
+                            best_checkpoint_path,
+                            "learner_group",
+                            "learner",
+                            "rl_module",
+                            "attackers",
+                        )
+                    )
                 ),
-                "attacker2": RLModuleSpec(),
-                "defenders": RLModuleSpec(),
-                # "fixed_policy": RLModuleSpec(
-                #     module_class=RandomRLModule,
-                # ),
+                "defenders": RLModuleSpec
+                .from_module(
+                    RLModule.from_checkpoint(
+                        os.path.join(
+                            best_checkpoint_path,
+                            "learner_group",
+                            "learner",
+                            "rl_module",
+                            "defenders",
+                        )
+                    )
+                ),
+                "fixed_policy": RLModuleSpec(
+                    module_class=FixedRLModule,
+                ),
             },
         ),
     )
@@ -306,15 +336,11 @@ from ray.rllib.utils.metrics import (
 )
 from ray.tune.result import TIME_TOTAL_S, TRAINING_ITERATION
 
-# stop={"training_iteration": 20}
-results = run_rllib_example_script_experiment(base_config, args)
+stop={"training_iteration": 2000}
+results = run_rllib_example_script_experiment(base_config, args,stop=stop)
 
 module_chkpt_path = (
         Path(results.get_best_result().checkpoint.path)
-        / COMPONENT_LEARNER_GROUP
-        / COMPONENT_LEARNER
-        / COMPONENT_RL_MODULE
-        / "attacker1"
     )
 assert module_chkpt_path.is_dir()
 pprint(module_chkpt_path)

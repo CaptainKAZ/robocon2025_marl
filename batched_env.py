@@ -4,6 +4,7 @@ from gymnasium import spaces
 import numpy as np
 from config import Config
 
+
 class BatchedMultiAgentEnv(gym.Env):
     def __init__(self, num_envs=1024):
         super().__init__()
@@ -34,9 +35,7 @@ class BatchedMultiAgentEnv(gym.Env):
             low=-Config.MAX_ACCEL, high=Config.MAX_ACCEL, shape=(2,), dtype=np.float32
         )
 
-        self.done_mask = torch.zeros(
-            (num_envs,), dtype=torch.bool, device=self.device
-        )
+        self.done_mask = torch.zeros((num_envs,), dtype=torch.bool, device=self.device)
         self.steps = 0
 
     def get_done_mask(self):
@@ -109,10 +108,13 @@ class BatchedMultiAgentEnv(gym.Env):
 
         # 计算奖励
         rewards = self._compute_base_rewards()
-        rewards = self._handle_collision_penalties(rewards, violation_flags)
-        rewards = self._handle_boundary_penalties(rewards)
         rewards = self._handle_agent_proximity_penalties(rewards, distances)
         rewards = self._handle_wall_proximity_penalties(rewards)
+        rewards = self._handle_collision_penalties(
+            rewards, collision_matrix, violation_flags
+        )
+        rewards = self._handle_boundary_penalties(rewards)
+
         # 终止条件和奖励计算
         reach_target, rewards = self._compute_terminal_rewards(rewards, collision_dones)
         # 奖励缩放
@@ -150,7 +152,13 @@ class BatchedMultiAgentEnv(gym.Env):
             "collisions": collision_matrix.cpu().numpy(),
         }
 
-        return obs, rewards.cpu().numpy(), terminated.cpu().numpy(), truncated.cpu().numpy(), info
+        return (
+            obs,
+            rewards.cpu().numpy(),
+            terminated.cpu().numpy(),
+            truncated.cpu().numpy(),
+            info,
+        )
 
     def _compute_base_rewards(self):
         """计算基础奖励分量"""
@@ -170,40 +178,60 @@ class BatchedMultiAgentEnv(gym.Env):
 
         # R0奖励：接近目标 + 末端减速
         speed_penalty = torch.where(
-            r0_dist < Config.TARGET_THRESHOLD,
+            r0_dist < Config.R0_SPEED_PENALTY_DIST_THRESHOLD,
             torch.norm(self.velocities[:, 0], dim=1) * Config.R0_SPEED_PENALTY,
             0.0,
         )
 
-        rewards[:, 0] = (-r0_dist * Config.R0_DIST_SCALE) + ((self.r0_last_dist - r0_dist) * Config.R0_DIST_VEC_SCALE) - speed_penalty - Config.TIME_REWARD * self.steps
+        rewards[:, 0] = (
+            (-r0_dist * Config.R0_DIST_SCALE)
+            + ((self.r0_last_dist - r0_dist) * Config.R0_DIST_VEC_SCALE)
+            - speed_penalty
+            - Config.TIME_REWARD * self.steps
+        )
 
         self.r0_last_dist = r0_dist
 
         # R1奖励：支持R0 + 保持距离
-        opp_to_target_dist = torch.norm(opp_positions - self.targets.unsqueeze(1), dim=2)  # [num_envs, 2]
-        reward_opp_away_from_target = opp_to_target_dist.mean(dim=1) * Config.R1_OPPONENT_TARGET_SCALE  # 对手离目标越远奖励越高
+        opp_to_target_dist = torch.norm(
+            opp_positions - self.targets.unsqueeze(1), dim=2
+        )  # [num_envs, 2]
+        reward_opp_away_from_target = (
+            opp_to_target_dist.mean(dim=1) * Config.R1_OPPONENT_TARGET_SCALE
+        )  # 对手离目标越远奖励越高
 
         # 2. 驱赶对手远离R0
-        opp_to_r0_dist = torch.norm(opp_positions - r0_pos.unsqueeze(1), dim=2)  # [num_envs, 2]
-        reward_opp_away_from_r0 = opp_to_r0_dist.mean(dim=1) * Config.R1_OPPONENT_R0_SCALE  # 对手离R0越远奖励越高
+        opp_to_r0_dist = torch.norm(
+            opp_positions - r0_pos.unsqueeze(1), dim=2
+        )  # [num_envs, 2]
+        reward_opp_away_from_r0 = (
+            opp_to_r0_dist.mean(dim=1) * Config.R1_OPPONENT_R0_SCALE
+        )  # 对手离R0越远奖励越高
 
         # 合并奖励项
         rewards[:, 1] = (
             (-r0_dist * Config.R1_R0_SCALE)  # 原有：鼓励R0接近目标
-            + reward_opp_away_from_target    # 新增：对手远离目标
-            + reward_opp_away_from_r0         # 新增：对手远离R0
+            + reward_opp_away_from_target  # 新增：对手远离目标
+            + reward_opp_away_from_r0  # 新增：对手远离R0
         )
 
-        # R2/R3奖励：阻止R0 + 靠近R0
+        # 新增半场条件判断
+        half_width = Config.WIDTH / 2
+        r2_condition = (self.positions[:, 2, 0] > half_width).float()  # R2的x坐标条件
+        r3_condition = (self.positions[:, 3, 0] > half_width).float()  # R3的x坐标条件
+
+        # R2/R3奖励：阻止R0 + 半场条件限制的靠近奖励
         rewards[:, 2] = (
-            (r0_dist * Config.R2_R0_SCALE)
-            + (1 / (opp_dist[:, 0] + 1e-6)) * Config.R2_PROXIMITY_SCALE
-            + Config.TIME_REWARD*self.steps + r0_speed * Config.R2_R1_SPEED_SCALE
+            (r0_dist * Config.R2_R0_SCALE) * r2_condition
+            + (1 / (opp_dist[:, 0] + 1e-6)) * Config.R2_PROXIMITY_SCALE * r2_condition
+            + Config.TIME_REWARD * self.steps
+            + r0_speed * Config.R2_R1_SPEED_SCALE
         )
         rewards[:, 3] = (
-            (r0_dist * Config.R3_R0_SCALE)
-            + (1 / (opp_dist[:, 1] + 1e-6)) * Config.R3_PROXIMITY_SCALE
-            + Config.TIME_REWARD*self.steps + r0_speed * Config.R2_R1_SPEED_SCALE
+            (r0_dist * Config.R3_R0_SCALE) * r3_condition
+            + (1 / (opp_dist[:, 1] + 1e-6)) * Config.R3_PROXIMITY_SCALE * r3_condition
+            + Config.TIME_REWARD * self.steps
+            + r0_speed * Config.R3_R1_SPEED_SCALE
         )
 
         return rewards
@@ -237,42 +265,42 @@ class BatchedMultiAgentEnv(gym.Env):
         dist_top = Config.HEIGHT - positions[..., 1]
 
         # 获取到最近墙体的距离
-        min_wall_dist = torch.stack([
-            dist_left, 
-            dist_right,
-            dist_bottom,
-            dist_top
-        ], dim=-1).min(dim=-1)[0]  # [n_env, n_agent]
+        min_wall_dist = torch.stack(
+            [dist_left, dist_right, dist_bottom, dist_top], dim=-1
+        ).min(dim=-1)[
+            0
+        ]  # [n_env, n_agent]
 
         # 动态惩罚计算：距离越近惩罚越大
         safe_mask = min_wall_dist < Config.WALL_SAFE_DISTANCE
-        penalty_ratio = (Config.WALL_SAFE_DISTANCE - min_wall_dist) / Config.WALL_SAFE_DISTANCE
+        penalty_ratio = (
+            Config.WALL_SAFE_DISTANCE - min_wall_dist
+        ) / Config.WALL_SAFE_DISTANCE
         penalty_ratio = torch.clamp(penalty_ratio, min=0)
         penalties = penalty_ratio * Config.WALL_PROXIMITY_SCALE
 
         rewards -= torch.where(safe_mask, penalties, 0.0)
         return rewards
 
-    def _handle_collision_penalties(self, rewards, violation_flags):
-        """处理碰撞违规惩罚"""
-        # 队伍掩码
-        team_masks = torch.zeros(
-            (2, Config.NUM_AGENTS), dtype=torch.bool, device=self.device
+    def _handle_collision_penalties(self, rewards, collision_matrix, violation_flags):
+        """向量化实现碰撞惩罚与防守奖励"""
+        # 防守方掩码 [NUM_AGENTS]
+        defenders_mask = torch.tensor([False, False, True, True], device=self.device)
+
+        # 计算参与碰撞的智能体 [num_envs, NUM_AGENTS]
+        collision_participated = collision_matrix.any(dim=2)
+
+        # 无责防守方标记 [num_envs, NUM_AGENTS]
+        no_fault_defenders = (
+            defenders_mask.unsqueeze(0)  # 是防守方
+            & ~violation_flags  # 无责任
+            & collision_participated  # 参与碰撞
         )
-        team_masks[0, :2] = True  # 队伍1 (0,1)
-        team_masks[1, 2:] = True  # 队伍2 (2,3)
 
-        # 检测队伍违规
-        team_violations = torch.stack(
-            [(violation_flags & mask).any(dim=1, keepdim=True) for mask in team_masks]
-        )
-
-        # 清零违规队伍奖励
-        for i, mask in enumerate(team_masks):
-            rewards[:, mask] *= ~team_violations[i]
-
-        # 违规者额外惩罚
+        # 应用惩罚和奖励
         rewards -= violation_flags.float() * Config.VIOLATION_PENALTY
+        rewards += no_fault_defenders.float() * Config.DEFENDER_BONUS
+
         return rewards
 
     def _handle_boundary_penalties(self, rewards):
@@ -283,28 +311,48 @@ class BatchedMultiAgentEnv(gym.Env):
             * collision_speed
             * Config.WALL_PENALTY
         )
-        return rewards - boundary_penalty * Config.DT
+        return rewards - boundary_penalty
 
     def _compute_terminal_rewards(self, rewards, collision_dones):
-        """计算终止条件奖励"""
+        """计算终止条件奖励（排除碰撞情况下的目标到达）"""
         # 到达目标检测
         r0_dist = torch.norm(self.positions[:, 0] - self.targets, dim=1)
         reach_target = (r0_dist < Config.ROBOT_RADIUS) & (
             torch.norm(self.velocities[:, 0], dim=1) < Config.TARGET_VEL_THRESHOLD
         )
 
-        # 队伍奖励/惩罚
-        rewards[:, [0, 1]] += reach_target.unsqueeze(1) * (Config.TEAM_SUCCESS_REWARD)
-        rewards[:, [2, 3]] -= reach_target.unsqueeze(1) * Config.OPPONENT_FAIL_PENALTY
+        # 排除碰撞情况下的目标到达
+        valid_reach_target = reach_target & ~collision_dones
 
-        return reach_target, rewards
+        if valid_reach_target.sum() > 0:
+            print(f"[{self.steps}] 完成率：{valid_reach_target.sum() / self.num_envs:.2f}")
+        
+
+        # 队伍奖励/惩罚（仅在有效目标到达时生效）
+        rewards[:, [0, 1]] += (
+            valid_reach_target.unsqueeze(1)
+            * Config.TEAM_SUCCESS_REWARD
+            * (Config.MAX_TIME / Config.DT - self.steps)
+        )
+        rewards[:, [2, 3]] -= (
+            valid_reach_target.unsqueeze(1)
+            * Config.OPPONENT_FAIL_PENALTY
+            * (Config.MAX_TIME / Config.DT - self.steps)
+        )
+
+        # 超时判定惩罚，鼓励防守方拖延时间
+        if self.steps >= Config.MAX_TIME / Config.DT:
+            rewards[:, [0, 1]] -= Config.ATTACKER_TIMEOUT_PENALTY
+            rewards[:, [2, 3]] += Config.DEFENDER_TIMEOUT_BONUS
+
+        return valid_reach_target, rewards
 
     def _get_obs(self):
         """构建观测张量"""
         obs = torch.zeros(
-            (self.num_envs, Config.NUM_AGENTS, Config.OBS_DIM), 
+            (self.num_envs, Config.NUM_AGENTS, Config.OBS_DIM),
             device=self.device,
-            dtype=torch.float32
+            dtype=torch.float32,
         )
 
         for agent_id in range(Config.NUM_AGENTS):
@@ -313,7 +361,11 @@ class BatchedMultiAgentEnv(gym.Env):
             self_vel = self.velocities[:, agent_id]
 
             # 队友信息
-            teammate_id = 1 if agent_id == 0 else 0 if agent_id == 1 else 3 if agent_id == 2 else 2
+            teammate_id = (
+                1
+                if agent_id == 0
+                else 0 if agent_id == 1 else 3 if agent_id == 2 else 2
+            )
             team_pos = self.positions[:, teammate_id]
             team_vel = self.velocities[:, teammate_id]
 
@@ -322,6 +374,7 @@ class BatchedMultiAgentEnv(gym.Env):
             opp_pos = self.positions[:, opp_ids].flatten(start_dim=1)
             opp_vel = self.velocities[:, opp_ids].flatten(start_dim=1)
             unknown_target = torch.zeros_like(self.targets)
+            time_info = torch.ones(self.num_envs, 1) * (self.steps / (Config.MAX_TIME / Config.DT))
 
             # 拼接观测
             obs[:, agent_id] = torch.cat(
@@ -332,7 +385,10 @@ class BatchedMultiAgentEnv(gym.Env):
                     team_vel,
                     opp_pos,
                     opp_vel,
-                    self.targets if agent_id < 2 else unknown_target,  # R2 R3不知道R1去哪里投篮
+                    (
+                        self.targets if agent_id < 2 else unknown_target
+                    ),  # R2 R3不知道R1去哪里投篮
+                    time_info,
                 ],
                 dim=1,
             )
@@ -341,6 +397,7 @@ class BatchedMultiAgentEnv(gym.Env):
 
     def reset(self):
         """带安全检测的环境重置"""
+        Config.reload()
         # 位置初始化（新方法）
         left_x = (Config.WIDTH - Config.BUFFER) / 2
         self._init_positions(
@@ -435,7 +492,26 @@ class BatchedMultiAgentEnv(gym.Env):
 
         # 速度比较矩阵 [num_envs, i, j]
         speed_diff = speeds.unsqueeze(2) - speeds.unsqueeze(1)
-        violation_matrix = collision_matrix & (speed_diff >= 0)
+
+        # 新增部分：检测防守方（R2/R3）是否在本方半场
+        defenders_mask = torch.tensor(
+            [False, False, True, True], device=self.device
+        )  # 防守方掩码
+        positions_x = self.positions[..., 0]  # 所有智能体的x坐标 [num_envs, num_agents]
+        in_defense_half = positions_x < (Config.WIDTH / 2)  # 是否在本方半场
+        defenders_in_half = defenders_mask & in_defense_half  # [num_envs, num_agents]
+
+        # 生成防守方半场违规掩码 [num_envs, i, j]
+        defender_half_violation = defenders_in_half.unsqueeze(
+            2
+        ) | defenders_in_half.unsqueeze(
+            1
+        )  # 任意一方是防守方且在本方半场
+
+        # 合并违规条件：速度更快或防守方在本方半场
+        violation_matrix = collision_matrix & (
+            (speed_diff >= 0) | defender_half_violation
+        )
 
         # 聚合违规标记
         violation_flags = violation_matrix.any(dim=2)
